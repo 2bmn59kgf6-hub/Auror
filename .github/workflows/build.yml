@@ -1,0 +1,217 @@
+name: Build Aurora Visuals
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Build mod
+        run: |
+          mkdir -p proj/src/main/java/ru/visualclient proj/src/main/resources
+          cd proj
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'fabric-loom' version '1.6.12'
+          }
+          version = project.mod_version
+          group = project.maven_group
+          base {
+              archivesName = project.archives_base_name
+          }
+          repositories {
+              mavenCentral()
+          }
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+          processResources {
+              inputs.property 'version', project.version
+              filesMatching('fabric.mod.json') {
+                  expand 'version': project.version
+              }
+          }
+          tasks.withType(JavaCompile).configureEach {
+              options.encoding = 'UTF-8'
+              options.release = 8
+          }
+          java {
+              toolchain {
+                  languageVersion = JavaLanguageVersion.of(17)
+              }
+          }
+          EOF
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  gradlePluginPortal()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'aurora-visuals'
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.16.5
+          yarn_mappings=1.16.5+build.10
+          loader_version=0.14.25
+          fabric_version=0.42.0+1.16
+          mod_version=1.0.0
+          maven_group=ru.visualclient
+          archives_base_name=aurora-visuals-1.16.5
+          EOF
+
+          cat > src/main/resources/fabric.mod.json <<'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "visualclient",
+            "version": "${version}",
+            "name": "Aurora Visuals",
+            "description": "Client-side visual settings and wing-like particle effects for Minecraft 1.16.5.",
+            "authors": ["Aurora Visuals"],
+            "license": "MIT",
+            "environment": "client",
+            "entrypoints": {
+              "client": ["ru.visualclient.VisualClient"]
+            },
+            "depends": {
+              "fabricloader": ">=0.14.0",
+              "fabric": "*",
+              "minecraft": "1.16.5",
+              "java": ">=8"
+            }
+          }
+          EOF
+
+          cat > src/main/java/ru/visualclient/ClientConfig.java <<'EOF'
+          package ru.visualclient;
+          import com.google.gson.Gson;
+          import com.google.gson.GsonBuilder;
+          import net.fabricmc.loader.api.FabricLoader;
+          import java.io.IOException;
+          import java.nio.charset.StandardCharsets;
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          public class ClientConfig {
+              private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+              private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("aurora-visuals.json");
+              public int theme = 3;
+              public boolean wings = true, aura = true, particles = true;
+              public float wingSize = 1.0F;
+              public static ClientConfig load() {
+                  try {
+                      if (Files.exists(FILE)) {
+                          ClientConfig c = GSON.fromJson(new String(Files.readAllBytes(FILE), StandardCharsets.UTF_8), ClientConfig.class);
+                          if (c != null) return c;
+                      }
+                  } catch (Exception ignored) { }
+                  return new ClientConfig();
+              }
+              public void save() {
+                  try {
+                      Files.createDirectories(FILE.getParent());
+                      Files.write(FILE, GSON.toJson(this).getBytes(StandardCharsets.UTF_8));
+                  } catch (IOException e) {
+                      VisualClient.LOGGER.error("Could not save config", e);
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/ru/visualclient/VisualClient.java <<'EOF'
+          package ru.visualclient;
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.particle.ParticleTypes;
+          import org.lwjgl.glfw.GLFW;
+          import org.apache.logging.log4j.Logger;
+          import org.apache.logging.log4j.LogManager;
+          public class VisualClient implements ClientModInitializer {
+              public static final Logger LOGGER = LogManager.getLogger("VisualClient");
+              public static ClientConfig CONFIG;
+              private static boolean shiftWasDown;
+              private static int particleTick;
+              @Override public void onInitializeClient() {
+                  CONFIG = ClientConfig.load();
+                  ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                      boolean down = client.getWindow() != null && GLFW.glfwGetKey(client.getWindow().getHandle(), GLFW.GLFW_KEY_RIGHT_SHIFT) == GLFW.GLFW_PRESS;
+                      if (down && !shiftWasDown && client.currentScreen == null) client.openScreen(new VisualScreen());
+                      shiftWasDown = down;
+                      tickVisuals(client);
+                  });
+                  LOGGER.info("Aurora Visuals 1.16.5 loaded. Right Shift opens settings.");
+              }
+              private static void tickVisuals(MinecraftClient client) {
+                  if (client.player == null || client.world == null || !CONFIG.wings || !CONFIG.particles || (++particleTick % 3 != 0)) return;
+                  double yaw = Math.toRadians(client.player.yaw), bx = Math.sin(yaw) * 0.38, bz = -Math.cos(yaw) * 0.38;
+                  double scale = Math.max(0.5, Math.min(2.0, CONFIG.wingSize));
+                  for (int side = -1; side <= 1; side += 2) {
+                      for (int i = 0; i < 5; i++) {
+                          double t = i / 4.0, spread = (0.25 + t * 0.55) * scale, rise = (0.55 - t * 0.62) * scale;
+                          double x = client.player.getX() + bx + Math.cos(yaw) * side * spread;
+                          double z = client.player.getZ() + bz + Math.sin(yaw) * side * spread;
+                          client.world.addParticle(ParticleTypes.END_ROD, x, client.player.getY() + 1.15 + rise, z, 0.0, 0.008, 0.0);
+                      }
+                      if (CONFIG.aura) {
+                          double x = client.player.getX() + bx + (Math.random() - 0.5) * 1.5 * scale;
+                          double y = client.player.getY() + 1.0 + (Math.random() - 0.5) * 1.2 * scale;
+                          double z = client.player.getZ() + bz + (Math.random() - 0.5) * 0.5;
+                          client.world.addParticle(ParticleTypes.PORTAL, x, y, z, 0.0, 0.015, 0.0);
+                      }
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/ru/visualclient/VisualScreen.java <<'EOF'
+          package ru.visualclient;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.client.util.math.MatrixStack;
+          import net.minecraft.text.LiteralText;
+          public class VisualScreen extends Screen {
+              private static final String[] THEMES = {"Обычная", "Ч/Б", "Розовая", "Фиолетовая", "Красная"};
+              public VisualScreen() { super(new LiteralText("AURORA VISUALS")); }
+              @Override protected void init() {
+                  int c = width / 2, y = Math.max(35, height / 2 - 95);
+                  addButton(new ButtonWidget(c-105,y,210,20,themeLabel(),b->{VisualClient.CONFIG.theme=(VisualClient.CONFIG.theme+1)%THEMES.length;b.setMessage(themeLabel());VisualClient.CONFIG.save();})); y+=26;
+                  addButton(new ButtonWidget(c-105,y,210,20,wingsLabel(),b->{VisualClient.CONFIG.wings=!VisualClient.CONFIG.wings;b.setMessage(wingsLabel());VisualClient.CONFIG.save();})); y+=26;
+                  addButton(new ButtonWidget(c-105,y,210,20,auraLabel(),b->{VisualClient.CONFIG.aura=!VisualClient.CONFIG.aura;b.setMessage(auraLabel());VisualClient.CONFIG.save();})); y+=26;
+                  addButton(new ButtonWidget(c-105,y,210,20,sizeLabel(),b->{VisualClient.CONFIG.wingSize+=0.25F;if(VisualClient.CONFIG.wingSize>2.0F)VisualClient.CONFIG.wingSize=0.5F;b.setMessage(sizeLabel());VisualClient.CONFIG.save();})); y+=26;
+                  addButton(new ButtonWidget(c-105,y,210,20,particlesLabel(),b->{VisualClient.CONFIG.particles=!VisualClient.CONFIG.particles;b.setMessage(particlesLabel());VisualClient.CONFIG.save();})); y+=26;
+                  addButton(new ButtonWidget(c-105,y,210,20,new LiteralText("Готово"),b->onClose()));
+              }
+              private LiteralText themeLabel(){return new LiteralText("Тема: "+THEMES[Math.max(0,Math.min(THEMES.length-1,VisualClient.CONFIG.theme))]);}
+              private LiteralText wingsLabel(){return new LiteralText("Крылья: "+(VisualClient.CONFIG.wings?"ВКЛ":"ВЫКЛ"));}
+              private LiteralText auraLabel(){return new LiteralText("Аура: "+(VisualClient.CONFIG.aura?"ВКЛ":"ВЫКЛ"));}
+              private LiteralText particlesLabel(){return new LiteralText("Частицы: "+(VisualClient.CONFIG.particles?"ВКЛ":"ВЫКЛ"));}
+              private LiteralText sizeLabel(){return new LiteralText("Размер крыльев: "+String.format(java.util.Locale.ROOT,"%.2f",VisualClient.CONFIG.wingSize));}
+              @Override public void render(MatrixStack m,int mx,int my,float delta){renderBackground(m);int color=themeColor();fill(m,0,0,width,height,0xD9101020);fill(m,width/2-120,height/2-112,width/2+120,height/2+105,0xE6222038);fill(m,width/2-120,height/2-112,width/2+120,height/2-109,color);drawCenteredText(m,textRenderer,title,width/2,height/2-104,0xFFFFFF);super.render(m,mx,my,delta);drawCenteredText(m,textRenderer,new LiteralText("Right Shift — открыть меню"),width/2,height-16,0xAAAAAA);}
+              private int themeColor(){switch(VisualClient.CONFIG.theme){case 1:return 0xFFDDDDDD;case 2:return 0xFFFF69B4;case 4:return 0xFFFF3333;default:return 0xFF9B6BFF;}}
+              @Override public void onClose(){VisualClient.CONFIG.save();super.onClose();}
+          }
+          EOF
+
+          gradle build --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aurora-visuals-1.16.5
+          path: proj/build/libs/*.jar
+          if-no-files-found: error
